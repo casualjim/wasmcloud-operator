@@ -1061,6 +1061,7 @@ leafnodes {
         Ok(_existing_cm) => {
             // ConfigMap already exists, use it as-is
             info!("ConfigMap '{}' already exists, using existing configuration", configmap_name);
+            return Ok(());
         }
         Err(kube::Error::Api(api_error)) if api_error.code == 404 => {
             // ConfigMap doesn't exist, create it
