@@ -1052,24 +1052,45 @@ leafnodes {
     let rendered = tpl.render_template(template, &json!({"jetstream_domain": config.spec.leaf_node_domain, "cluster_url": config.spec.nats_address, "leafnode_port": config.spec.nats_leafnode_port,"use_credentials": use_nats_creds}))?;
     let mut contents = BTreeMap::new();
     contents.insert("nats.conf".to_string(), rendered);
-    let cm = ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(config.name_any()),
-            namespace: Some(config.namespace().unwrap()),
-            owner_references: Some(vec![config.controller_owner_ref(&()).unwrap()]),
-            ..Default::default()
-        },
-        data: Some(contents),
-        ..Default::default()
-    };
 
     let api = Api::<ConfigMap>::namespaced(ctx.client.clone(), &config.namespace().unwrap());
-    api.patch(
-        &config.name_any(),
-        &PatchParams::apply(CLUSTER_CONFIG_FINALIZER),
-        &Patch::Apply(cm),
-    )
-    .await?;
+    let configmap_name = config.name_any();
+
+    // Check if configmap already exists
+    match api.get(&configmap_name).await {
+        Ok(_existing_cm) => {
+            // ConfigMap already exists, use it as-is
+            info!("ConfigMap '{}' already exists, using existing configuration", configmap_name);
+            return Ok(());
+        }
+        Err(kube::Error::Api(api_error)) if api_error.code == 404 => {
+            // ConfigMap doesn't exist, create it
+            debug!("ConfigMap '{}' doesn't exist, creating it", configmap_name);
+            let cm = ConfigMap {
+                metadata: ObjectMeta {
+                    name: Some(configmap_name.clone()),
+                    namespace: Some(config.namespace().unwrap()),
+                    owner_references: Some(vec![config.controller_owner_ref(&()).unwrap()]),
+                    ..Default::default()
+                },
+                data: Some(contents),
+                ..Default::default()
+            };
+
+            api.patch(
+                &configmap_name,
+                &PatchParams::apply(CLUSTER_CONFIG_FINALIZER),
+                &Patch::Apply(cm),
+            )
+            .await?;
+            info!("Created new ConfigMap '{}'", configmap_name);
+        }
+        Err(e) => {
+            // Some other error occurred while checking for the configmap
+            warn!("Failed to check for existing ConfigMap '{}': {}", configmap_name, e);
+            return Err(Error::KubeError(e));
+        }
+    }
 
     Ok(())
 }
