@@ -1058,38 +1058,9 @@ leafnodes {
 
     // Check if configmap already exists
     match api.get(&configmap_name).await {
-        Ok(existing_cm) => {
-            debug!("ConfigMap '{}' already exists, checking if we need to update it", configmap_name);
-            
-            // Check if we can manage this configmap (has our owner reference or no owner references)
-            let can_manage = existing_cm.metadata.owner_references.as_ref()
-                .map(|refs| refs.iter().any(|r| r.uid == config.controller_owner_ref(&()).unwrap().uid))
-                .unwrap_or(true); // If no owner references, we can manage it
-            
-            if can_manage {
-                // We can safely update this configmap
-                let cm = ConfigMap {
-                    metadata: ObjectMeta {
-                        name: Some(configmap_name.clone()),
-                        namespace: Some(config.namespace().unwrap()),
-                        owner_references: Some(vec![config.controller_owner_ref(&()).unwrap()]),
-                        ..Default::default()
-                    },
-                    data: Some(contents),
-                    ..Default::default()
-                };
-
-                api.patch(
-                    &configmap_name,
-                    &PatchParams::apply(CLUSTER_CONFIG_FINALIZER),
-                    &Patch::Apply(cm),
-                )
-                .await?;
-                info!("Updated existing ConfigMap '{}'", configmap_name);
-            } else {
-                // ConfigMap exists but is owned by someone else, use it as-is
-                info!("ConfigMap '{}' already exists and is managed by another controller, using existing configuration", configmap_name);
-            }
+        Ok(_existing_cm) => {
+            // ConfigMap already exists, use it as-is
+            info!("ConfigMap '{}' already exists, using existing configuration", configmap_name);
         }
         Err(kube::Error::Api(api_error)) if api_error.code == 404 => {
             // ConfigMap doesn't exist, create it
