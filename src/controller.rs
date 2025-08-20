@@ -1058,9 +1058,62 @@ leafnodes {
 
     // Check if configmap already exists
     match api.get(&configmap_name).await {
-        Ok(_existing_cm) => {
-            // ConfigMap already exists, use it as-is
-            info!("ConfigMap '{}' already exists, using existing configuration", configmap_name);
+        Ok(existing_cm) => {
+            // ConfigMap already exists: adopt it by setting ownerReferences (do not modify data)
+            let mut owner_refs = existing_cm.metadata.owner_references.unwrap_or_default();
+
+            let our_owner_ref = match config.controller_owner_ref(&()) {
+                Some(or) => or,
+                None => {
+                    warn!(
+                        "Unable to create ownerReference for '{}', leaving ConfigMap as-is",
+                        configmap_name
+                    );
+                    return Ok(());
+                }
+            };
+
+            let already_owned = owner_refs.iter().any(|r| r.uid == our_owner_ref.uid);
+
+            if already_owned {
+                info!(
+                    "ConfigMap '{configmap_name}' already exists and is owned by this resource, using existing configuration",
+                );
+                return Ok(());
+            }
+
+            owner_refs.push(our_owner_ref);
+
+            // Use server-side apply with the same field manager as the create path,
+            // but only apply metadata.ownerReferences to avoid modifying data.
+            let adopt_cm = ConfigMap {
+                metadata: ObjectMeta {
+                    name: Some(configmap_name.clone()),
+                    namespace: Some(config.namespace().unwrap()),
+                    owner_references: Some(owner_refs),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            api.patch(
+                &configmap_name,
+                &PatchParams::apply(CLUSTER_CONFIG_FINALIZER),
+                &Patch::Apply(adopt_cm),
+            )
+            .await
+            .map_err(|e| {
+                warn!(
+                    "Failed to adopt existing ConfigMap '{}' via server-side apply: {}",
+                    configmap_name, e
+                );
+                e
+            })?;
+
+            info!(
+                "Adopted existing ConfigMap '{}' by adding ownerReferences; left data unmodified",
+                configmap_name
+            );
             return Ok(());
         }
         Err(kube::Error::Api(api_error)) if api_error.code == 404 => {
@@ -1087,7 +1140,10 @@ leafnodes {
         }
         Err(e) => {
             // Some other error occurred while checking for the configmap
-            warn!("Failed to check for existing ConfigMap '{}': {}", configmap_name, e);
+            warn!(
+                "Failed to check for existing ConfigMap '{}': {}",
+                configmap_name, e
+            );
             return Err(Error::KubeError(e));
         }
     }
